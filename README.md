@@ -46,6 +46,102 @@ Rscript SCbootstrap.R \
 | `--logfc_threshold` | `0.25` | Log-fold-change threshold for `FindMarkers` |
 | `--seed` | `42` | Random seed |
 
+## Examples
+
+### Minimal run
+
+The only required arguments are `--input` and `--markers`. All other flags use
+their defaults (50 iterations, 80 % subsample, output to `SCbootstrap_results/`).
+
+```bash
+Rscript SCbootstrap.R \
+  --input   data/pbmc3k.rds \
+  --markers markers/pbmc_markers.json
+```
+
+---
+
+### Quick sanity check (5 iterations, small subsample)
+
+Run a fast sanity check before committing to a full analysis. Using a small
+subsample (`0.3`) and few iterations (`5`) completes in seconds on a laptop.
+
+```bash
+Rscript SCbootstrap.R \
+  --input        data/pbmc3k.rds \
+  --markers      markers/pbmc_markers.json \
+  --iterations   5 \
+  --subsample    0.3 \
+  --output_dir   sanity_check/
+```
+
+---
+
+### Full run with custom parameters
+
+Override every default to increase statistical power and tighten thresholds:
+
+```bash
+Rscript SCbootstrap.R \
+  --input            data/pbmc3k.rds \
+  --markers          markers/pbmc_markers.json \
+  --iterations       100 \
+  --subsample        0.7 \
+  --assay            RNA \
+  --min_cells        20 \
+  --logfc_threshold  0.5 \
+  --output_dir       results/pbmc_100iter/
+```
+
+---
+
+### Reproducible run (fixed seed)
+
+Set `--seed` to an explicit value so the exact same cells are drawn in every
+iteration, making results fully reproducible:
+
+```bash
+Rscript SCbootstrap.R \
+  --input      data/pbmc3k.rds \
+  --markers    markers/pbmc_markers.json \
+  --seed       123 \
+  --output_dir results/pbmc_seed123/
+```
+
+---
+
+### Using a CSV marker file
+
+If you prefer a CSV over JSON, provide the path to the `.csv` file.
+The file must have two columns (no header): `CellType`, `Gene`.
+
+```bash
+Rscript SCbootstrap.R \
+  --input      data/pbmc3k.rds \
+  --markers    markers/pbmc_markers.csv \
+  --output_dir results/pbmc_csv/
+```
+
+---
+
+### Reading results in R
+
+After the script finishes, load the outputs directly in R for further analysis:
+
+```r
+# Core markers table (aggregated across all iterations)
+core <- read.csv("results/pbmc_100iter/core_markers.csv")
+
+# View top markers per cell type (>= 80 % iteration detection)
+subset(core, pct_iter >= 80)
+
+# Per-iteration DEA data frames (list, one element per iteration)
+iter_results <- readRDS("results/pbmc_100iter/iteration_results.rds")
+head(iter_results[[1]])   # inspect the first iteration
+```
+
+---
+
 ## Marker dictionary formats
 
 **JSON** (recommended)
