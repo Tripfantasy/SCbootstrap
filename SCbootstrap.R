@@ -12,6 +12,8 @@
 #     [--assay       RNA]                      \
 #     [--min_cells   10]                       \
 #     [--logfc_threshold 0.25]                 \
+#     [--core_pct_threshold 70]                \
+#     [--core_cv_threshold 1.0]                \
 #     [--seed        42]
 #
 # Input:
@@ -25,6 +27,8 @@
 #   --assay        : Seurat assay to use (default: "RNA")
 #   --min_cells    : Minimum number of cells required per label to run DEA (default: 10)
 #   --logfc_threshold : Log-fold-change threshold for FindMarkers (default: 0.25)
+#   --core_pct_threshold : Min detection percentage to call a core gene (default: 70)
+#   --core_cv_threshold  : Max log2FC coefficient of variation for a core gene (default: 1.0)
 #   --seed         : Random seed for reproducibility (default: 42)
 #
 # Outputs (written to output_dir):
@@ -235,7 +239,6 @@ build_iteration_diagnostics <- function(sobj, marker_dict, iteration, min_cells)
     data.frame(
       iteration = iteration,
       cell_type = ct,
-      marker_set = ct,
       mean_score_all = mean(vals, na.rm = TRUE),
       mean_score_assigned = if (sum(in_ct) > 0) mean(vals[in_ct], na.rm = TRUE) else NA_real_,
       median_score_assigned = if (sum(in_ct) > 0) median(vals[in_ct], na.rm = TRUE) else NA_real_,
@@ -279,135 +282,6 @@ run_dea <- function(sobj, assay, min_cells, logfc_threshold) {
       next
     }
 
-    #' Compute robust core-gene metrics from aggregate DEA output
-    identify_core_genes <- function(core_markers, all_de, core_pct_threshold, core_cv_threshold, min_log2fc) {
-      stability <- all_de %>%
-        group_by(cell_type, gene) %>%
-        summarise(
-          sd_log2FC = sd(avg_log2FC, na.rm = TRUE),
-          .groups = "drop"
-        )
-
-      gene_metrics <- core_markers %>%
-        left_join(stability, by = c("cell_type", "gene")) %>%
-        mutate(
-          cv_log2FC = ifelse(abs(mean_log2FC) > 1e-12, sd_log2FC / abs(mean_log2FC), NA_real_),
-          cv_log2FC = ifelse(is.nan(cv_log2FC) | is.infinite(cv_log2FC), NA_real_, cv_log2FC),
-          contribution_score = round((pct_iter * pmax(mean_log2FC, 0)) / (1 + coalesce(cv_log2FC, 1)), 4),
-          is_core_gene = pct_iter >= core_pct_threshold &
-            mean_log2FC >= min_log2fc &
-            coalesce(cv_log2FC, 0) <= core_cv_threshold
-        ) %>%
-        arrange(cell_type, desc(is_core_gene), desc(contribution_score), desc(mean_log2FC))
-
-      cell_types <- unique(gene_metrics$cell_type)
-      core_gene_sets <- setNames(lapply(cell_types, function(ct) {
-        gene_metrics$gene[gene_metrics$cell_type == ct & gene_metrics$is_core_gene]
-      }), cell_types)
-
-      celltype_summary <- gene_metrics %>%
-        group_by(cell_type) %>%
-        summarise(
-          n_genes = n(),
-          n_core_genes = sum(is_core_gene),
-          median_pct_iter = round(median(pct_iter, na.rm = TRUE), 2),
-          median_contribution_score = round(median(contribution_score, na.rm = TRUE), 4),
-          .groups = "drop"
-        )
-
-      list(
-        gene_metrics = gene_metrics,
-        core_gene_sets = core_gene_sets,
-        celltype_summary = celltype_summary
-      )
-    }
-
-    #' Generate interactive HTML report
-    generate_interactive_report <- function(core_markers, core_gene_metrics, celltype_summary,
-                                            iteration_metrics, contribution_metrics, output_file) {
-      top_markers <- core_gene_metrics %>%
-        group_by(cell_type) %>%
-        slice_max(order_by = contribution_score, n = 25, with_ties = FALSE) %>%
-        ungroup()
-
-      p_contrib <- plot_ly(
-        data = top_markers,
-        x = ~cell_type,
-        y = ~gene,
-        type = "scatter",
-        mode = "markers",
-        color = ~mean_log2FC,
-        colors = "Reds",
-        marker = list(sizemode = "diameter"),
-        size = ~pmax(pct_iter, 1),
-        text = ~paste0(
-          "Cell type: ", cell_type,
-          "<br>Gene: ", gene,
-          "<br>% detected: ", pct_iter,
-          "<br>Mean log2FC: ", mean_log2FC,
-          "<br>Contribution score: ", contribution_score,
-          "<br>Core gene: ", is_core_gene
-        ),
-        hoverinfo = "text"
-      ) %>%
-        layout(
-          title = "Marker contribution map (top genes by contribution score)",
-          xaxis = list(title = "Cell type"),
-          yaxis = list(title = "Gene")
-        )
-
-      p_distribution <- plot_ly(
-        data = core_markers,
-        x = ~cell_type,
-        y = ~pct_iter,
-        type = "box",
-        color = ~cell_type,
-        boxpoints = "outliers",
-        showlegend = FALSE
-      ) %>%
-        layout(
-          title = "Distribution of marker detection consistency by cell type",
-          xaxis = list(title = "Cell type"),
-          yaxis = list(title = "% iterations detected")
-        )
-
-      contribution_table <- contribution_metrics %>%
-        mutate(
-          mean_score_all = round(mean_score_all, 4),
-          mean_score_assigned = round(mean_score_assigned, 4),
-          median_score_assigned = round(median_score_assigned, 4)
-        )
-
-      iter_table <- iteration_metrics %>%
-        arrange(cell_type, iteration)
-
-      report_tag <- tagList(
-        tags$h1("SCbootstrap interactive report"),
-        tags$p("Inspect marker contributions, cell-type distribution metrics, and core-gene consistency."),
-        tags$h2("Marker contribution map"),
-        as.tags(p_contrib),
-        tags$h2("Detection consistency distribution"),
-        as.tags(p_distribution),
-        tags$h2("Cell-type summary"),
-        DT::datatable(celltype_summary, options = list(pageLength = 10)),
-        tags$h2("Marker contribution metrics by iteration"),
-        DT::datatable(contribution_table, options = list(pageLength = 10)),
-        tags$h2("Per-iteration cell-type distribution metrics"),
-        DT::datatable(iter_table, options = list(pageLength = 10)),
-        tags$h2("Gene-level metrics"),
-        DT::datatable(
-          core_gene_metrics %>%
-            select(cell_type, gene, pct_iter, mean_log2FC, cv_log2FC, contribution_score, is_core_gene),
-          options = list(pageLength = 15)
-        )
-      )
-
-      htmltools::save_html(
-        html = browsable(report_tag),
-        file = output_file
-      )
-    }
-
     de <- tryCatch(
       FindMarkers(
         sobj,
@@ -434,6 +308,142 @@ run_dea <- function(sobj, assay, min_cells, logfc_threshold) {
 
   if (length(results) == 0) return(NULL)
   do.call(rbind, results)
+}
+
+#' Compute robust core-gene metrics from aggregate DEA output
+#' Expects core_markers to contain: cell_type, gene, pct_iter, mean_log2FC, n_iter_de_tested.
+#' Expects all_de to contain: cell_type, gene, avg_log2FC.
+identify_core_genes <- function(core_markers, all_de, core_pct_threshold, core_cv_threshold, min_log2fc) {
+  stability <- all_de %>%
+    group_by(cell_type, gene) %>%
+    summarise(
+      sd_log2FC = sd(avg_log2FC, na.rm = TRUE),
+      .groups = "drop"
+    )
+
+  gene_metrics <- core_markers %>%
+    left_join(stability, by = c("cell_type", "gene")) %>%
+    mutate(
+      cv_log2FC = ifelse(abs(mean_log2FC) > 1e-12, sd_log2FC / abs(mean_log2FC), NA_real_),
+      cv_log2FC = ifelse(is.nan(cv_log2FC) | is.infinite(cv_log2FC), NA_real_, cv_log2FC),
+      # Reward consistently detected, strongly positive genes while penalising unstable effect sizes.
+      contribution_score = round((pct_iter * pmax(mean_log2FC, 0)) / (1 + coalesce(cv_log2FC, 1)), 4),
+      is_eligible = coalesce(n_iter_de_tested, 0) > 0,
+      is_core_gene = coalesce(pct_iter, 0) >= core_pct_threshold &
+        is_eligible &
+        mean_log2FC >= min_log2fc &
+        coalesce(cv_log2FC, Inf) <= core_cv_threshold
+    ) %>%
+    arrange(cell_type, desc(is_core_gene), desc(contribution_score), desc(mean_log2FC))
+
+  cell_types <- unique(gene_metrics$cell_type)
+  core_gene_sets <- setNames(lapply(cell_types, function(ct) {
+    gene_metrics$gene[gene_metrics$cell_type == ct & gene_metrics$is_core_gene]
+  }), cell_types)
+
+  celltype_summary <- gene_metrics %>%
+    group_by(cell_type) %>%
+    summarise(
+      n_genes = n(),
+      n_core_genes = sum(is_core_gene),
+      median_pct_iter = round(median(pct_iter, na.rm = TRUE), 2),
+      median_contribution_score = round(median(contribution_score, na.rm = TRUE), 4),
+      .groups = "drop"
+    )
+
+  list(
+    gene_metrics = gene_metrics,
+    core_gene_sets = core_gene_sets,
+    celltype_summary = celltype_summary
+  )
+}
+
+#' Generate interactive HTML report
+generate_interactive_report <- function(core_markers, core_gene_metrics, celltype_summary,
+                                        iteration_metrics, contribution_metrics, output_file) {
+  top_markers <- core_gene_metrics %>%
+    group_by(cell_type) %>%
+    slice_max(order_by = contribution_score, n = 25, with_ties = FALSE) %>%
+    ungroup()
+  max_marker_size <- max(top_markers$pct_iter, na.rm = TRUE)
+  marker_sizeref <- ifelse(is.finite(max_marker_size) && max_marker_size > 0,
+                           2 * max_marker_size / (35^2), 1)
+
+  p_contrib <- plot_ly(
+    data = top_markers,
+    x = ~cell_type,
+    y = ~gene,
+    type = "scatter",
+    mode = "markers",
+    color = ~mean_log2FC,
+    colors = "Reds",
+    marker = list(size = ~pmax(pct_iter, 1), sizemode = "diameter", sizeref = marker_sizeref),
+    text = ~paste0(
+      "Cell type: ", cell_type,
+      "<br>Gene: ", gene,
+      "<br>% detected: ", pct_iter,
+      "<br>Mean log2FC: ", mean_log2FC,
+      "<br>Contribution score: ", contribution_score,
+      "<br>Core gene: ", is_core_gene
+    ),
+    hoverinfo = "text"
+  ) %>%
+    layout(
+      title = "Marker contribution map (top genes by contribution score)",
+      xaxis = list(title = "Cell type"),
+      yaxis = list(title = "Gene")
+    )
+
+  p_distribution <- plot_ly(
+    data = core_markers %>% filter(!is.na(pct_iter)),
+    x = ~cell_type,
+    y = ~pct_iter,
+    type = "box",
+    color = ~cell_type,
+    boxpoints = "outliers",
+    showlegend = FALSE
+  ) %>%
+    layout(
+      title = "Distribution of marker detection consistency by cell type",
+      xaxis = list(title = "Cell type"),
+      yaxis = list(title = "% iterations detected")
+    )
+
+  contribution_table <- contribution_metrics %>%
+    mutate(
+      mean_score_all = round(mean_score_all, 4),
+      mean_score_assigned = round(mean_score_assigned, 4),
+      median_score_assigned = round(median_score_assigned, 4)
+    )
+
+  iter_table <- iteration_metrics %>%
+    arrange(cell_type, iteration)
+
+  report_tag <- tagList(
+    tags$h1("SCbootstrap interactive report"),
+    tags$p("Inspect marker contributions, cell-type distribution metrics, and core-gene consistency."),
+    tags$h2("Marker contribution map"),
+    p_contrib,
+    tags$h2("Detection consistency distribution"),
+    p_distribution,
+    tags$h2("Cell-type summary"),
+    DT::datatable(celltype_summary, options = list(pageLength = 10)),
+    tags$h2("Marker contribution metrics by iteration"),
+    DT::datatable(contribution_table, options = list(pageLength = 10)),
+    tags$h2("Per-iteration cell-type distribution metrics"),
+    DT::datatable(iter_table, options = list(pageLength = 10)),
+    tags$h2("Gene-level metrics"),
+    DT::datatable(
+      core_gene_metrics %>%
+        select(cell_type, gene, pct_iter, mean_log2FC, cv_log2FC, contribution_score, is_core_gene),
+      options = list(pageLength = 15)
+    )
+  )
+
+  htmltools::save_html(
+    html = browsable(report_tag),
+    file = output_file
+  )
 }
 
 # ---------------------------------------------------------------------------
@@ -527,7 +537,7 @@ celltype_denominators <- celltype_iter_metrics %>%
 core_markers <- core_markers %>%
   left_join(celltype_denominators, by = "cell_type") %>%
   mutate(
-    pct_iter = round(ifelse(n_iter_de_tested > 0, n_iter_detected / n_iter_de_tested * 100, 0), 1)
+    pct_iter = round(ifelse(n_iter_de_tested > 0, n_iter_detected / n_iter_de_tested * 100, NA_real_), 1)
   ) %>%
   arrange(cell_type, desc(pct_iter), desc(mean_log2FC))
 
