@@ -16,7 +16,7 @@ differential expression analysis (DEA).
 ## Requirements
 
 ```r
-install.packages(c("optparse", "dplyr", "jsonlite", "ggplot2"))
+install.packages(c("optparse", "dplyr", "jsonlite", "plotly", "DT", "htmltools"))
 # Seurat v4 or v5
 install.packages("Seurat")
 ```
@@ -44,6 +44,8 @@ Rscript SCbootstrap.R \
 | `--assay` | `RNA` | Seurat assay to use |
 | `--min_cells` | `10` | Min cells per label to run DEA |
 | `--logfc_threshold` | `0.25` | Log-fold-change threshold for `FindMarkers` |
+| `--core_pct_threshold` | `70` | Minimum detection percentage for calling a gene “core” |
+| `--core_cv_threshold` | `1.0` | Maximum log2FC coefficient-of-variation for calling a gene “core” |
 | `--seed` | `42` | Random seed |
 
 ## Examples
@@ -167,10 +169,12 @@ All files are written to `--output_dir`:
 | File | Description |
 |---|---|
 | `iteration_results.rds` | List of per-iteration DEA data frames |
-| `core_markers.csv` | Aggregated marker consistency table (one row per gene × cell type) |
+| `core_markers.csv` | Aggregated marker consistency table (one row per gene × cell type; includes per-cell-type iteration denominators) |
 | `core_markers.rds` | Same table as an R data frame |
-| `plots/consistency_histogram.pdf` | Detection frequency histogram per cell type |
-| `plots/top_core_markers_dotplot.pdf` | Dot plot of top-20 core markers per cell type |
+| `core_gene_metrics.csv` | Gene-level stability and contribution scoring metrics used for core-gene calling |
+| `core_gene_sets.rds` | Named list of inferred core genes for each cell type |
+| `iteration_celltype_metrics.csv` | Per-iteration cell-type counts and DEA-eligibility diagnostics |
+| `interactive_report.html` | Interactive HTML report with marker contribution map, consistency distribution, and sortable metric tables |
 
 ### `core_markers.csv` columns
 
@@ -184,3 +188,7 @@ All files are written to `--output_dir`:
 | `mean_pct1` | Mean fraction expressing in the labelled cell type |
 | `mean_pct2` | Mean fraction expressing in background cells |
 | `mean_p_val_adj` | Mean adjusted p-value across iterations |
+| `n_iter_label_present` | Number of iterations where the cell type had at least one assigned cell |
+| `n_iter_de_tested` | Number of iterations where DEA was actually eligible for the cell type |
+| `mean_cells_per_iteration` | Mean assigned cells per iteration for the cell type |
+| `sd_cells_per_iteration` | Standard deviation of assigned cell counts across iterations |
