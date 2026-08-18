@@ -326,15 +326,17 @@ identify_core_genes <- function(core_markers, all_de, core_pct_threshold, core_c
     mutate(
       cv_log2FC = ifelse(abs(mean_log2FC) > 1e-12, sd_log2FC / abs(mean_log2FC), NA_real_),
       cv_log2FC = ifelse(is.nan(cv_log2FC) | is.infinite(cv_log2FC), NA_real_, cv_log2FC),
-      # Reward consistently detected, strongly positive genes while penalising unstable effect sizes.
-      contribution_score = round((pct_iter * pmax(mean_log2FC, 0)) / (1 + coalesce(cv_log2FC, 1)), 4),
+      # Reward consistently detected genes with strong effect in either direction while penalising
+      # unstable effect sizes.  Using abs(mean_log2FC) avoids discarding strong negative markers
+      # and prevents extremely high positive values from masking noise.
+      contribution_score = round((pct_iter * abs(mean_log2FC)) / (1 + coalesce(cv_log2FC, 1)), 4),
       is_eligible = coalesce(n_iter_de_tested, 0) > 0,
       is_core_gene = coalesce(pct_iter, 0) >= core_pct_threshold &
         is_eligible &
-        mean_log2FC >= min_log2fc &
+        abs(mean_log2FC) >= min_log2fc &
         coalesce(cv_log2FC, Inf) <= core_cv_threshold
     ) %>%
-    arrange(cell_type, desc(is_core_gene), desc(contribution_score), desc(mean_log2FC))
+    arrange(cell_type, desc(is_core_gene), desc(contribution_score), desc(abs(mean_log2FC)))
 
   cell_types <- unique(gene_metrics$cell_type)
   core_gene_sets <- setNames(lapply(cell_types, function(ct) {
@@ -369,6 +371,8 @@ generate_interactive_report <- function(core_markers, core_gene_metrics, celltyp
   marker_sizeref <- ifelse(is.finite(max_marker_size) && max_marker_size > 0,
                            2 * max_marker_size / (35^2), 1)
 
+  fc_vals <- top_markers$mean_log2FC[is.finite(top_markers$mean_log2FC)]
+  fc_abs_max <- if (length(fc_vals) > 0 && max(abs(fc_vals)) > 0) max(abs(fc_vals)) else 1
   p_contrib <- plot_ly(
     data = top_markers,
     x = ~cell_type,
@@ -376,7 +380,8 @@ generate_interactive_report <- function(core_markers, core_gene_metrics, celltyp
     type = "scatter",
     mode = "markers",
     color = ~mean_log2FC,
-    colors = "Reds",
+    colors = "RdBu",
+    zmin = -fc_abs_max, zmax = fc_abs_max,
     marker = list(size = ~pmax(pct_iter, 1), sizemode = "diameter", sizeref = marker_sizeref),
     text = ~paste0(
       "Cell type: ", cell_type,
